@@ -1,0 +1,13 @@
+# Build artifacts
+build/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+compile_commands.json
+
+# Go cache and binaries
+.gocache/
+*.test
+
+# Editor and OS files
+.DS_Store

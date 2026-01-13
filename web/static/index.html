@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Flare Engine</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="top">
+      <div class="brand">
+        <h1>Flare Engine</h1>
+        <p>Play against Flare Engine Locally</p>
+      </div>
+      <div class="status-card">
+        <div class="status-label">Status</div>
+        <div id="status" class="status">Connecting</div>
+        <div id="message" class="message"></div>
+      </div>
+    </header>
+
+    <main class="layout">
+      <section class="board-panel">
+        <div id="board" class="board" aria-label="chess board"></div>
+        <div id="note" class="note">You are playing White. Promotions default to a queen.</div>
+      </section>
+
+      <aside class="sidebar">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Game</h2>
+            <button id="new-game" class="restart" type="button">Restart</button>
+          </div>
+          <div class="meta">
+            <div class="meta-row">
+              <span class="meta-label">Turn</span>
+              <span id="turn" class="meta-value">White</span>
+            </div>
+          </div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Moves</h2>
+            <div id="move-count" class="move-count">0 moves</div>
+          </div>
+          <div id="moves" class="moves-grid" role="list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2 id="fen-label">Current FEN</h2>
+          </div>
+          <div id="fen" class="fen"></div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
