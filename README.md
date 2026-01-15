@@ -1,8 +1,10 @@
 # Flare Engine
 
-Flare Engine is a free and open source UCI chess engine, rewritten from my older C++ engine and updated for C++23 with g++-13.
+Flare Engine is a free and open source UCI chess engine, rewritten from my older C++ engine and updated for C++23.
 It includes a local web interface in Go using WebSockets for play against the engine.
-Features focus on fast move generation, parallel search, and a simple local UI.
+Features include UCI protocol support, multi-threaded alpha-beta search, a Zobrist-based transposition table, bitboards, and FEN support.
+
+![Web interface](assets/example.png)
 
 ## Build
 ```
