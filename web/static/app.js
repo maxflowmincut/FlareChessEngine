@@ -2,6 +2,8 @@ const boardEl = document.getElementById("board");
 const movesEl = document.getElementById("moves");
 const statusEl = document.getElementById("status");
 const messageEl = document.getElementById("message");
+const statusDotEl = document.getElementById("status-dot");
+const lastUpdateEl = document.getElementById("last-update");
 const noteEl = document.getElementById("note");
 const fenEl = document.getElementById("fen");
 const fenLabelEl = document.getElementById("fen-label");
@@ -184,12 +186,23 @@ function renderMoves() {
 }
 
 function setStatus(text) {
-  statusEl.textContent = text || "";
-  statusEl.classList.toggle("status-over", text === "Game over");
+  const value = text || "";
+  statusEl.textContent = value;
+  statusEl.classList.toggle("status-over", value === "Game over");
+  document.title = value ? `Flare Engine - ${value}` : "Flare Engine";
 }
 
 function logMessage(text) {
   messageEl.textContent = text || "";
+}
+
+function setConnectionState(state) {
+  if (document.body) {
+    document.body.dataset.connection = state;
+  }
+  if (statusDotEl) {
+    statusDotEl.dataset.state = state;
+  }
 }
 
 function updateNote() {
@@ -288,6 +301,9 @@ function handleState(msg) {
   renderBoard();
   renderMoves();
   logMessage(msg.message || "");
+  if (lastUpdateEl) {
+    lastUpdateEl.textContent = new Date().toLocaleTimeString();
+  }
   if (fenEl) {
     fenEl.textContent = msg.fen;
   }
@@ -314,11 +330,13 @@ function handleError(msg) {
 }
 
 function connect() {
+  setConnectionState("connecting");
   const protocol = window.location.protocol === "https:" ? "wss" : "ws";
   const url = `${protocol}://${window.location.host}/ws`;
   socket = new WebSocket(url);
 
   socket.addEventListener("open", () => {
+    setConnectionState("connected");
     setStatus("Connected");
     sendMessage({ type: "new", color: playerColor === "w" ? "white" : "black" });
   });
@@ -339,11 +357,13 @@ function connect() {
   });
 
   socket.addEventListener("close", () => {
+    setConnectionState("disconnected");
     setStatus("Disconnected");
     state.waiting = true;
   });
 
   socket.addEventListener("error", () => {
+    setConnectionState("disconnected");
     logMessage("WebSocket error");
   });
 }

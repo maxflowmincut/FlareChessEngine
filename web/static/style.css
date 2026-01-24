@@ -6,6 +6,8 @@
   --ink: #1e1b16;
   --muted: #5b5246;
   --accent: #b2512f;
+  --ok: #3e8f5f;
+  --warn: #c08a2c;
   --panel: #fbf8f3;
   --shadow: rgba(26, 18, 8, 0.14);
   --board-light: #f3e8d8;
@@ -78,6 +80,32 @@ button:hover {
   color: var(--ink);
 }
 
+.status-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.status-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+  background: var(--muted);
+  box-shadow: 0 0 0 3px rgba(30, 27, 22, 0.1);
+}
+
+body[data-connection="connecting"] .status-dot {
+  background: var(--warn);
+}
+
+body[data-connection="connected"] .status-dot {
+  background: var(--ok);
+}
+
+body[data-connection="disconnected"] .status-dot {
+  background: var(--accent);
+}
+
 .status.status-over {
   color: var(--accent);
 }
@@ -104,6 +132,11 @@ button:hover {
   font-size: 13px;
   color: var(--accent);
   min-height: 16px;
+}
+
+.status-meta {
+  margin-top: 10px;
+  font-size: 12px;
 }
 
 .layout {

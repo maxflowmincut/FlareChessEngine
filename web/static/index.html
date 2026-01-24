@@ -13,10 +13,17 @@
         <h1>Flare Engine</h1>
         <p>Play against Flare Engine Locally</p>
       </div>
-      <div class="status-card">
+      <div class="status-card" role="status" aria-live="polite">
         <div class="status-label">Status</div>
-        <div id="status" class="status">Connecting</div>
-        <div id="message" class="message"></div>
+        <div class="status-row">
+          <span id="status-dot" class="status-dot" aria-hidden="true"></span>
+          <div id="status" class="status">Connecting</div>
+        </div>
+        <div id="message" class="message" aria-live="polite"></div>
+        <div class="meta-row status-meta">
+          <span class="meta-label">Last update</span>
+          <span id="last-update" class="meta-value">--</span>
+        </div>
       </div>
     </header>
 
