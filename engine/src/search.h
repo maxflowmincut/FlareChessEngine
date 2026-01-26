@@ -15,7 +15,13 @@ struct SearchResult {
 	std::uint64_t nodes = 0;
 };
 
+struct SearchLimits {
+	int max_depth = 0;
+	std::int64_t time_ms = 0;
+};
+
 SearchResult Search(Position& position, int max_depth, TranspositionTable& table, int threads = 1);
+SearchResult Search(Position& position, const SearchLimits& limits, TranspositionTable& table,
+	int threads = 1);
 
 }
-

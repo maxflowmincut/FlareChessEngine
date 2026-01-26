@@ -30,6 +30,17 @@ struct UciState {
 	int default_depth = 4;
 };
 
+struct GoLimits {
+	bool infinite = false;
+	int depth = 0;
+	int movetime = 0;
+	int wtime = 0;
+	int btime = 0;
+	int winc = 0;
+	int binc = 0;
+	int movestogo = 0;
+};
+
 std::vector<std::string> SplitTokens(const std::string& line) {
 	std::istringstream input(line);
 	std::vector<std::string> tokens;
@@ -51,6 +62,15 @@ bool ParseInt(std::string_view text, int& value) {
 	}
 	value = parsed;
 	return true;
+}
+
+bool ExtractTokenInt(const std::vector<std::string>& tokens, std::string_view key, int& value) {
+	for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
+		if (tokens[i] == key) {
+			return ParseInt(tokens[i + 1], value);
+		}
+	}
+	return false;
 }
 
 bool ApplyUciMove(Position& position, std::string_view uci) {
@@ -138,17 +158,42 @@ void HandleSetOption(UciState& state, const std::vector<std::string>& tokens) {
 	}
 }
 
-int ExtractDepth(const std::vector<std::string>& tokens, int fallback) {
-	for (std::size_t i = 0; i + 1 < tokens.size(); ++i) {
-		if (tokens[i] == "depth") {
-			int parsed = 0;
-			if (ParseInt(tokens[i + 1], parsed)) {
-				return std::max(1, parsed);
-			}
-			return fallback;
+GoLimits ParseGoLimits(const std::vector<std::string>& tokens) {
+	GoLimits limits;
+	ExtractTokenInt(tokens, "depth", limits.depth);
+	ExtractTokenInt(tokens, "movetime", limits.movetime);
+	ExtractTokenInt(tokens, "wtime", limits.wtime);
+	ExtractTokenInt(tokens, "btime", limits.btime);
+	ExtractTokenInt(tokens, "winc", limits.winc);
+	ExtractTokenInt(tokens, "binc", limits.binc);
+	ExtractTokenInt(tokens, "movestogo", limits.movestogo);
+	for (const auto& token : tokens) {
+		if (token == "infinite") {
+			limits.infinite = true;
+			break;
 		}
 	}
-	return fallback;
+	return limits;
+}
+
+int AllocateTimeMs(const GoLimits& limits, Color side_to_move) {
+	if (limits.movetime > 0) {
+		return std::max(1, limits.movetime);
+	}
+	int remaining = side_to_move == Color::kWhite ? limits.wtime : limits.btime;
+	int increment = side_to_move == Color::kWhite ? limits.winc : limits.binc;
+	if (remaining <= 0) {
+		return 0;
+	}
+	int moves_to_go = limits.movestogo > 0 ? limits.movestogo : 30;
+	int slice = remaining / std::max(1, moves_to_go);
+	int budget = slice + increment;
+	budget = static_cast<int>(budget * 0.9);
+	int max_budget = std::max(1, remaining - 10);
+	if (budget <= 0) {
+		budget = 1;
+	}
+	return std::min(budget, max_budget);
 }
 
 void PrintUciId(const UciState& state) {
@@ -216,8 +261,21 @@ int RunUciLoop() {
 		} else if (command == "incheck") {
 			PrintInCheck(state.position);
 		} else if (command == "go") {
-			int depth = ExtractDepth(tokens, state.default_depth);
-			SearchResult result = Search(state.position, depth, state.table, state.threads);
+			GoLimits limits = ParseGoLimits(tokens);
+			bool has_time = limits.movetime > 0 || limits.wtime > 0 || limits.btime > 0;
+			SearchResult result;
+			if (has_time) {
+				SearchLimits search_limits;
+				search_limits.max_depth = limits.depth;
+				search_limits.time_ms = AllocateTimeMs(limits, state.position.side_to_move_);
+				if (search_limits.time_ms <= 0) {
+					search_limits.max_depth = limits.depth > 0 ? limits.depth : state.default_depth;
+				}
+				result = Search(state.position, search_limits, state.table, state.threads);
+			} else {
+				int depth = limits.depth > 0 ? limits.depth : state.default_depth;
+				result = Search(state.position, depth, state.table, state.threads);
+			}
 			std::cout << "info depth " << result.depth << " score cp " << result.score
 				<< " nodes " << result.nodes << "\n";
 			std::cout << "bestmove " << MoveToUci(result.best_move) << "\n";

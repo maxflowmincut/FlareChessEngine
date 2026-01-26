@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -25,6 +26,8 @@ struct SearchContext {
 	std::uint64_t nodes = 0;
 	std::array<std::array<Move, 2>, kMaxPly> killers{};
 	std::array<std::array<int, kSquareCount>, kSquareCount> history{};
+	std::atomic<bool>* stop = nullptr;
+	std::chrono::steady_clock::time_point deadline{};
 };
 
 struct NullState {
@@ -60,6 +63,23 @@ int ScoreFromTt(int score, int ply) {
 		return score + ply;
 	}
 	return score;
+}
+
+bool ShouldStop(SearchContext& context) {
+	if (!context.stop) {
+		return false;
+	}
+	if (context.stop->load(std::memory_order_relaxed)) {
+		return true;
+	}
+	if ((context.nodes & 4095) != 0) {
+		return false;
+	}
+	if (std::chrono::steady_clock::now() < context.deadline) {
+		return false;
+	}
+	context.stop->store(true, std::memory_order_relaxed);
+	return true;
 }
 
 bool HasNonPawnMaterial(const Position& position) {
@@ -148,6 +168,9 @@ void UpdateHistory(SearchContext& context, Move move, int depth, int ply) {
 
 int Quiescence(Position& position, int alpha, int beta, SearchContext& context, int ply) {
 	++context.nodes;
+	if (ShouldStop(context)) {
+		return Evaluate(position);
+	}
 
 	Square king_square = position.KingSquare(position.side_to_move_);
 	bool in_check = false;
@@ -208,6 +231,9 @@ int AlphaBeta(Position& position, int depth, int alpha, int beta, SearchContext&
 	}
 
 	++context.nodes;
+	if (ShouldStop(context)) {
+		return Evaluate(position);
+	}
 	int alpha_orig = alpha;
 	int beta_orig = beta;
 	std::uint64_t key = position.hash_;
@@ -293,7 +319,8 @@ int AlphaBeta(Position& position, int depth, int alpha, int beta, SearchContext&
 	return best_score;
 }
 
-SearchResult SearchRoot(Position& position, int depth, int threads, TranspositionTable& table) {
+SearchResult SearchRoot(Position& position, int depth, int threads, TranspositionTable& table,
+	std::atomic<bool>* stop, std::chrono::steady_clock::time_point deadline) {
 	SearchResult result;
 	std::vector<Move> moves;
 	GenerateLegalMoves(position, moves);
@@ -320,13 +347,21 @@ SearchResult SearchRoot(Position& position, int depth, int threads, Transpositio
 
 	if (threads <= 1 || moves.size() < 2) {
 		SearchContext context{table};
+		context.stop = stop;
+		context.deadline = deadline;
 		int alpha = -kInfinity;
 		int beta = kInfinity;
 		for (Move move : moves) {
+			if (stop && stop->load(std::memory_order_relaxed)) {
+				break;
+			}
 			MoveState state;
 			MakeMove(position, move, state);
 			int score = -AlphaBeta(position, depth - 1, -beta, -alpha, context, 1);
 			UndoMove(position, move, state);
+			if (stop && stop->load(std::memory_order_relaxed)) {
+				break;
+			}
 
 			if (score > best_score) {
 				best_score = score;
@@ -348,8 +383,13 @@ SearchResult SearchRoot(Position& position, int depth, int threads, Transpositio
 		for (int thread_index = 0; thread_index < threads; ++thread_index) {
 			workers.emplace_back([&, thread_index]() {
 				SearchContext context{table};
+				context.stop = stop;
+				context.deadline = deadline;
 				Position local = position;
 				while (true) {
+					if (stop && stop->load(std::memory_order_relaxed)) {
+						break;
+					}
 					std::size_t index = next_index.fetch_add(1);
 					if (index >= moves.size()) {
 						break;
@@ -359,6 +399,9 @@ SearchResult SearchRoot(Position& position, int depth, int threads, Transpositio
 					MakeMove(local, move, state);
 					int score = -AlphaBeta(local, depth - 1, -kInfinity, kInfinity, context, 1);
 					UndoMove(local, move, state);
+					if (stop && stop->load(std::memory_order_relaxed)) {
+						break;
+					}
 
 					{
 						std::lock_guard<std::mutex> guard(best_mutex);
@@ -392,11 +435,37 @@ SearchResult SearchRoot(Position& position, int depth, int threads, Transpositio
 }
 
 SearchResult Search(Position& position, int max_depth, TranspositionTable& table, int threads) {
+	SearchLimits limits;
+	limits.max_depth = max_depth;
+	return Search(position, limits, table, threads);
+}
+
+SearchResult Search(Position& position, const SearchLimits& limits, TranspositionTable& table,
+	int threads) {
 	SearchResult result;
+	SearchResult best;
+	bool have_best = false;
+	std::atomic<bool> stop{false};
+	auto* stop_ptr = limits.time_ms > 0 ? &stop : nullptr;
+	auto deadline = limits.time_ms > 0
+		? std::chrono::steady_clock::now() + std::chrono::milliseconds(limits.time_ms)
+		: std::chrono::steady_clock::time_point::max();
+	int max_depth = limits.max_depth > 0 ? limits.max_depth : kMaxPly;
 	for (int depth = 1; depth <= max_depth; ++depth) {
-		result = SearchRoot(position, depth, threads, table);
+		if (limits.time_ms > 0 && std::chrono::steady_clock::now() >= deadline) {
+			break;
+		}
+		result = SearchRoot(position, depth, threads, table, stop_ptr, deadline);
+		if (stop_ptr && stop.load(std::memory_order_relaxed)) {
+			if (!have_best) {
+				best = result;
+			}
+			break;
+		}
+		best = result;
+		have_best = true;
 	}
-	return result;
+	return have_best ? best : result;
 }
 
 }
