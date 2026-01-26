@@ -502,6 +502,7 @@ void DumpPerftDivide(Position& position, int depth) {
 void TestStartPositionPerft() {
 	Position position;
 	position.SetStartPosition();
+	ExpectEqual(Perft(position, 0), 1, "startpos perft depth 0");
 	ExpectEqual(Perft(position, 1), 20, "startpos perft depth 1");
 	ExpectEqual(Perft(position, 2), 400, "startpos perft depth 2");
 	ExpectEqual(Perft(position, 3), 8902, "startpos perft depth 3");
