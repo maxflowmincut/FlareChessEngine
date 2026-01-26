@@ -1,8 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
-#include <mutex>
 #include <vector>
 
 #include "move.h"
@@ -32,14 +32,15 @@ public:
 	void Store(std::uint64_t key, int depth, int score, Bound bound, Move best_move);
 
 private:
-	static constexpr std::size_t kEntryCount = 1 << 18;
-	static constexpr std::size_t kLockCount = 1 << 12;
+	struct AtomicEntry {
+		std::atomic<std::uint64_t> key{0};
+		std::atomic<std::uint64_t> data{0};
+	};
 
-	std::vector<TranspositionEntry> entries_;
-	mutable std::vector<std::mutex> locks_;
+	static constexpr std::size_t kEntryCount = 1 << 18;
+
+	std::vector<AtomicEntry> entries_;
 	std::size_t mask_ = 0;
-	std::size_t lock_mask_ = 0;
 };
 
 }
-

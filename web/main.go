@@ -28,6 +28,8 @@ const (
 	opPong  = 10
 )
 
+const engineAcquireTimeout = 5 * time.Second
+
 type ClientMessage struct {
 	Type       string `json:"type"`
 	Uci        string `json:"uci,omitempty"`
@@ -230,6 +232,101 @@ type EngineProcess struct {
 	stdin  io.WriteCloser
 	stdout *bufio.Reader
 	mu     sync.Mutex
+	lines  chan string
+	errs   chan error
+}
+
+var errEngineFailure = errors.New("engine failure")
+
+type EnginePool struct {
+	enginePath string
+	engines    chan *EngineProcess
+}
+
+func NewEnginePool(enginePath string, size int) (*EnginePool, error) {
+	if size <= 0 {
+		return nil, errors.New("engine pool size must be positive")
+	}
+	pool := &EnginePool{
+		enginePath: enginePath,
+		engines:    make(chan *EngineProcess, size),
+	}
+	for i := 0; i < size; i++ {
+		engine, err := startEngine(enginePath)
+		if err != nil {
+			pool.Close()
+			return nil, err
+		}
+		pool.engines <- engine
+	}
+	return pool, nil
+}
+
+func (p *EnginePool) Acquire(timeout time.Duration) (*EngineProcess, error) {
+	if p == nil {
+		return nil, errors.New("engine pool unavailable")
+	}
+	if timeout <= 0 {
+		engine := <-p.engines
+		return engine, nil
+	}
+	select {
+	case engine := <-p.engines:
+		return engine, nil
+	case <-time.After(timeout):
+		return nil, errors.New("engine pool exhausted")
+	}
+}
+
+func (p *EnginePool) Release(engine *EngineProcess, healthy bool) {
+	if engine == nil {
+		return
+	}
+	if p == nil {
+		engine.Close()
+		return
+	}
+	if !healthy {
+		engine.Close()
+		if replacement, err := startEngine(p.enginePath); err == nil {
+			select {
+			case p.engines <- replacement:
+			default:
+				replacement.Close()
+			}
+		} else {
+			log.Printf("engine pool replacement failed: %v", err)
+		}
+		return
+	}
+	if err := engine.NewGame(); err != nil {
+		engine.Close()
+		if replacement, err := startEngine(p.enginePath); err == nil {
+			select {
+			case p.engines <- replacement:
+			default:
+				replacement.Close()
+			}
+		} else {
+			log.Printf("engine pool replacement failed: %v", err)
+		}
+		return
+	}
+	select {
+	case p.engines <- engine:
+	default:
+		engine.Close()
+	}
+}
+
+func (p *EnginePool) Close() {
+	if p == nil {
+		return
+	}
+	close(p.engines)
+	for engine := range p.engines {
+		engine.Close()
+	}
 }
 
 func startEngine(path string) (*EngineProcess, error) {
@@ -253,12 +350,33 @@ func startEngine(path string) (*EngineProcess, error) {
 		cmd:    cmd,
 		stdin:  stdin,
 		stdout: bufio.NewReader(stdoutPipe),
+		lines:  make(chan string, 256),
+		errs:   make(chan error, 1),
 	}
+	engine.startReader()
 	if err := engine.handshake(); err != nil {
 		engine.Close()
 		return nil, err
 	}
 	return engine, nil
+}
+
+func (e *EngineProcess) startReader() {
+	go func() {
+		for {
+			line, err := e.stdout.ReadString('\n')
+			if err != nil {
+				select {
+				case e.errs <- err:
+				default:
+				}
+				close(e.lines)
+				return
+			}
+			line = strings.TrimSpace(line)
+			e.lines <- line
+		}
+	}()
 }
 
 func (e *EngineProcess) Close() {
@@ -383,11 +501,16 @@ func (e *EngineProcess) sendLocked(command string) error {
 }
 
 func (e *EngineProcess) readLineLocked() (string, error) {
-	line, err := e.stdout.ReadString('\n')
-	if err != nil {
-		return "", err
+	line, ok := <-e.lines
+	if !ok {
+		select {
+		case err := <-e.errs:
+			return "", err
+		default:
+			return "", io.EOF
+		}
 	}
-	return strings.TrimSpace(line), nil
+	return line, nil
 }
 
 func (e *EngineProcess) waitForPrefixLocked(prefix string) (string, error) {
@@ -497,7 +620,7 @@ func (s *Session) Reset(playerIsWhite bool) (string, string, string, error) {
 func (s *Session) SendState(ws *WsConn, status, engineMove, message string) error {
 	fen, err := s.engine.Fen(s.moves)
 	if err != nil {
-		return err
+		return fmt.Errorf("%w: %w", errEngineFailure, err)
 	}
 	state := ServerMessage{
 		Type:       "state",
@@ -510,15 +633,30 @@ func (s *Session) SendState(ws *WsConn, status, engineMove, message string) erro
 	return ws.WriteJSON(state)
 }
 
-func handleSession(ws *WsConn, enginePath string, depth int, movetimeMs int) {
+func handleSession(ws *WsConn, pool *EnginePool, enginePath string, depth int, movetimeMs int) {
 	defer ws.Close()
 
-	engine, err := startEngine(enginePath)
+	var engine *EngineProcess
+	var err error
+	if pool != nil {
+		engine, err = pool.Acquire(engineAcquireTimeout)
+	} else {
+		engine, err = startEngine(enginePath)
+	}
 	if err != nil {
 		_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 		return
 	}
-	defer engine.Close()
+	healthy := true
+	defer func() {
+		if pool != nil {
+			pool.Release(engine, healthy)
+			return
+		}
+		if engine != nil {
+			engine.Close()
+		}
+	}()
 
 	session := &Session{
 		engine:        engine,
@@ -528,11 +666,15 @@ func handleSession(ws *WsConn, enginePath string, depth int, movetimeMs int) {
 	}
 	status, message, engineMove, err := session.Reset(true)
 	if err != nil {
+		healthy = false
 		_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 		return
 	}
 
 	if err := session.SendState(ws, status, engineMove, message); err != nil {
+		if errors.Is(err, errEngineFailure) {
+			healthy = false
+		}
 		_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 		return
 	}
@@ -552,6 +694,7 @@ func handleSession(ws *WsConn, enginePath string, depth int, movetimeMs int) {
 			playerIsWhite := parsePlayerColor(msg.Color, session.playerIsWhite)
 			status, message, engineMove, err := session.Reset(playerIsWhite)
 			if err != nil {
+				healthy = false
 				_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 				continue
 			}
@@ -573,6 +716,7 @@ func handleSession(ws *WsConn, enginePath string, depth int, movetimeMs int) {
 			}
 			legalMoves, err := session.engine.LegalMoves(session.moves)
 			if err != nil {
+				healthy = false
 				_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 				continue
 			}
@@ -583,12 +727,14 @@ func handleSession(ws *WsConn, enginePath string, depth int, movetimeMs int) {
 			session.moves = append(session.moves, uci)
 			engineMoves, err := session.engine.LegalMoves(session.moves)
 			if err != nil {
+				healthy = false
 				_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 				continue
 			}
 			if len(engineMoves) == 0 {
 				inCheck, err := session.engine.InCheck(session.moves)
 				if err != nil {
+					healthy = false
 					_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 					continue
 				}
@@ -598,11 +744,15 @@ func handleSession(ws *WsConn, enginePath string, depth int, movetimeMs int) {
 			}
 
 			if err := session.SendState(ws, "Engine thinking", "", ""); err != nil {
+				if errors.Is(err, errEngineFailure) {
+					healthy = false
+				}
 				_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 				continue
 			}
 			bestMove, err := session.engine.BestMove(session.moves, session.depth, session.movetimeMs)
 			if err != nil {
+				healthy = false
 				_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 				continue
 			}
@@ -611,6 +761,7 @@ func handleSession(ws *WsConn, enginePath string, depth int, movetimeMs int) {
 			if bestMove == "" || bestMove == "(none)" || bestMove == "0000" {
 				inCheck, err := session.engine.InCheck(session.moves)
 				if err != nil {
+					healthy = false
 					_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 					continue
 				}
@@ -620,12 +771,14 @@ func handleSession(ws *WsConn, enginePath string, depth int, movetimeMs int) {
 				session.moves = append(session.moves, bestMove)
 				playerMoves, err := session.engine.LegalMoves(session.moves)
 				if err != nil {
+					healthy = false
 					_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 					continue
 				}
 				if len(playerMoves) == 0 {
 					inCheck, err := session.engine.InCheck(session.moves)
 					if err != nil {
+						healthy = false
 						_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 						continue
 					}
@@ -666,7 +819,20 @@ func main() {
 	depth := flag.Int("depth", 4, "search depth for engine replies")
 	movetimeMs := flag.Int("movetime", 1000, "search time per move in ms (overrides depth when > 0)")
 	staticDir := flag.String("static", "static", "static file directory")
+	poolSize := flag.Int("pool", 1, "engine pool size (0 = disable pooling)")
 	flag.Parse()
+
+	var pool *EnginePool
+	if *poolSize > 0 {
+		var err error
+		pool, err = NewEnginePool(*enginePath, *poolSize)
+		if err != nil {
+			log.Fatal(err)
+		}
+		log.Printf("engine pool size %d", *poolSize)
+	} else {
+		log.Printf("engine pooling disabled")
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -681,7 +847,7 @@ func main() {
 			http.Error(w, "websocket upgrade failed", http.StatusBadRequest)
 			return
 		}
-		go handleSession(ws, *enginePath, *depth, *movetimeMs)
+		go handleSession(ws, pool, *enginePath, *depth, *movetimeMs)
 	})
 
 	log.Printf("listening on http://%s", *addr)
