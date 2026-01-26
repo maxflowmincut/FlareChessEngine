@@ -1,6 +1,7 @@
 #include "search.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <mutex>
 #include <thread>
@@ -20,6 +21,16 @@ constexpr int kMateThreshold = 29000;
 struct SearchContext {
 	TranspositionTable& table;
 	std::uint64_t nodes = 0;
+};
+
+constexpr std::array<int, kPieceTypeCount> kMoveValues = {
+	0,    // kNone
+	100,  // kPawn
+	320,  // kKnight
+	330,  // kBishop
+	500,  // kRook
+	900,  // kQueen
+	20000 // kKing
 };
 
 int ScoreToTt(int score, int ply) {
@@ -42,10 +53,100 @@ int ScoreFromTt(int score, int ply) {
 	return score;
 }
 
-int AlphaBeta(Position& position, int depth, int alpha, int beta, SearchContext& context,
-	int ply) {
+bool IsTacticalMove(Move move) {
+	MoveFlag flag = MoveFlagOf(move);
+	if (flag == MoveFlag::kPromotion || flag == MoveFlag::kEnPassant) {
+		return true;
+	}
+	return CapturedPiece(move) != PieceType::kNone;
+}
+
+int MoveScore(Move move, Move tt_move) {
+	if (move == tt_move) {
+		return 1000000;
+	}
+	int score = 0;
+	PieceType captured = CapturedPiece(move);
+	if (captured != PieceType::kNone) {
+		score += 5000 + (kMoveValues[ToIndex(captured)] * 10 -
+			kMoveValues[ToIndex(MovedPiece(move))]);
+	}
+	if (MoveFlagOf(move) == MoveFlag::kPromotion) {
+		score += 8000 + kMoveValues[ToIndex(PromotionPiece(move))];
+	}
+	return score;
+}
+
+void OrderMoves(std::vector<Move>& moves, Move tt_move) {
+	if (moves.size() < 2) {
+		return;
+	}
+	std::stable_sort(moves.begin(), moves.end(),
+		[tt_move](Move a, Move b) { return MoveScore(a, tt_move) > MoveScore(b, tt_move); });
+}
+
+int Quiescence(Position& position, int alpha, int beta, SearchContext& context, int ply) {
 	++context.nodes;
 
+	Square king_square = position.KingSquare(position.side_to_move_);
+	bool in_check = false;
+	if (king_square != Square::kNoSquare) {
+		in_check = IsSquareAttacked(position, king_square,
+			OppositeColor(position.side_to_move_));
+	}
+
+	int stand_pat = -kInfinity;
+	if (!in_check) {
+		stand_pat = Evaluate(position);
+		if (stand_pat >= beta) {
+			return stand_pat;
+		}
+		if (stand_pat > alpha) {
+			alpha = stand_pat;
+		}
+	}
+
+	std::vector<Move> moves;
+	GenerateLegalMoves(position, moves);
+	if (moves.empty()) {
+		if (in_check) {
+			return -kMateScore + ply;
+		}
+		return 0;
+	}
+	if (!in_check) {
+		moves.erase(std::remove_if(moves.begin(), moves.end(),
+			[](Move move) { return !IsTacticalMove(move); }),
+			moves.end());
+	}
+	if (moves.empty()) {
+		return stand_pat;
+	}
+
+	OrderMoves(moves, kNoMove);
+	for (Move move : moves) {
+		MoveState state;
+		MakeMove(position, move, state);
+		int score = -Quiescence(position, -beta, -alpha, context, ply + 1);
+		UndoMove(position, move, state);
+
+		if (score >= beta) {
+			return score;
+		}
+		if (score > alpha) {
+			alpha = score;
+		}
+	}
+	return alpha;
+}
+
+int AlphaBeta(Position& position, int depth, int alpha, int beta, SearchContext& context,
+	int ply) {
+	if (depth == 0) {
+		return Quiescence(position, alpha, beta, context, ply);
+	}
+
+	++context.nodes;
 	int alpha_orig = alpha;
 	int beta_orig = beta;
 	std::uint64_t key = position.hash_;
@@ -70,10 +171,6 @@ int AlphaBeta(Position& position, int depth, int alpha, int beta, SearchContext&
 		}
 	}
 
-	if (depth == 0) {
-		return Evaluate(position);
-	}
-
 	std::vector<Move> moves;
 	GenerateLegalMoves(position, moves);
 	if (moves.empty()) {
@@ -83,12 +180,7 @@ int AlphaBeta(Position& position, int depth, int alpha, int beta, SearchContext&
 		return in_check ? -kMateScore + ply : 0;
 	}
 
-	if (tt_move != kNoMove) {
-		auto it = std::find(moves.begin(), moves.end(), tt_move);
-		if (it != moves.end()) {
-			std::iter_swap(moves.begin(), it);
-		}
-	}
+	OrderMoves(moves, tt_move);
 
 	Move best_move = kNoMove;
 	int best_score = -kInfinity;
@@ -139,12 +231,9 @@ SearchResult SearchRoot(Position& position, int depth, int threads, Transpositio
 
 	TranspositionEntry entry;
 	if (table.Probe(position.hash_, entry)) {
-		if (entry.best_move != kNoMove) {
-			auto it = std::find(moves.begin(), moves.end(), entry.best_move);
-			if (it != moves.end()) {
-				std::iter_swap(moves.begin(), it);
-			}
-		}
+		OrderMoves(moves, entry.best_move);
+	} else {
+		OrderMoves(moves, kNoMove);
 	}
 
 	int best_score = -kInfinity;
