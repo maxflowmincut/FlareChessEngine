@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <cstdint>
 
 #include "move.h"
@@ -18,6 +19,8 @@ struct SearchResult {
 struct SearchLimits {
 	int max_depth = 0;
 	std::int64_t time_ms = 0;
+	bool infinite = false;
+	std::atomic<bool>* stop = nullptr;
 };
 
 SearchResult Search(Position& position, int max_depth, TranspositionTable& table, int threads = 1);

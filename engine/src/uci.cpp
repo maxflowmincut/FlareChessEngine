@@ -1,6 +1,7 @@
 #include "uci.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cctype>
 #include <charconv>
@@ -28,6 +29,9 @@ struct UciState {
 	TranspositionTable table;
 	int threads = 1;
 	int default_depth = 4;
+	std::atomic<bool> stop{false};
+	bool search_active = false;
+	std::thread search_thread;
 };
 
 struct GoLimits {
@@ -196,6 +200,17 @@ int AllocateTimeMs(const GoLimits& limits, Color side_to_move) {
 	return std::min(budget, max_budget);
 }
 
+void StopSearch(UciState& state) {
+	if (!state.search_active) {
+		return;
+	}
+	state.stop.store(true, std::memory_order_relaxed);
+	if (state.search_thread.joinable()) {
+		state.search_thread.join();
+	}
+	state.search_active = false;
+}
+
 void PrintUciId(const UciState& state) {
 	std::cout << "id name Flare Engine\n";
 	std::cout << "id author Flare Engine\n";
@@ -248,11 +263,14 @@ int RunUciLoop() {
 		} else if (command == "isready") {
 			std::cout << "readyok\n";
 		} else if (command == "ucinewgame") {
+			StopSearch(state);
 			state.table.Clear();
 			state.position.SetStartPosition();
 		} else if (command == "setoption") {
+			StopSearch(state);
 			HandleSetOption(state, tokens);
 		} else if (command == "position") {
+			StopSearch(state);
 			SetPositionFromTokens(state, tokens);
 		} else if (command == "legalmoves") {
 			PrintLegalMoves(state.position);
@@ -260,26 +278,47 @@ int RunUciLoop() {
 			PrintFen(state.position);
 		} else if (command == "incheck") {
 			PrintInCheck(state.position);
+		} else if (command == "stop") {
+			StopSearch(state);
 		} else if (command == "go") {
 			GoLimits limits = ParseGoLimits(tokens);
+			StopSearch(state);
 			bool has_time = limits.movetime > 0 || limits.wtime > 0 || limits.btime > 0;
-			SearchResult result;
-			if (has_time) {
+			if (limits.infinite) {
+				state.stop.store(false, std::memory_order_relaxed);
+				Position position = state.position;
+				int threads = state.threads;
 				SearchLimits search_limits;
-				search_limits.max_depth = limits.depth;
-				search_limits.time_ms = AllocateTimeMs(limits, state.position.side_to_move_);
-				if (search_limits.time_ms <= 0) {
-					search_limits.max_depth = limits.depth > 0 ? limits.depth : state.default_depth;
-				}
-				result = Search(state.position, search_limits, state.table, state.threads);
+				search_limits.infinite = true;
+				search_limits.stop = &state.stop;
+				state.search_active = true;
+				state.search_thread = std::thread([&, position, search_limits, threads]() mutable {
+					SearchResult result = Search(position, search_limits, state.table, threads);
+					std::cout << "info depth " << result.depth << " score cp " << result.score
+						<< " nodes " << result.nodes << "\n";
+					std::cout << "bestmove " << MoveToUci(result.best_move) << "\n";
+					std::cout.flush();
+				});
 			} else {
-				int depth = limits.depth > 0 ? limits.depth : state.default_depth;
-				result = Search(state.position, depth, state.table, state.threads);
+				SearchResult result;
+				if (has_time) {
+					SearchLimits search_limits;
+					search_limits.max_depth = limits.depth;
+					search_limits.time_ms = AllocateTimeMs(limits, state.position.side_to_move_);
+					if (search_limits.time_ms <= 0) {
+						search_limits.max_depth = limits.depth > 0 ? limits.depth : state.default_depth;
+					}
+					result = Search(state.position, search_limits, state.table, state.threads);
+				} else {
+					int depth = limits.depth > 0 ? limits.depth : state.default_depth;
+					result = Search(state.position, depth, state.table, state.threads);
+				}
+				std::cout << "info depth " << result.depth << " score cp " << result.score
+					<< " nodes " << result.nodes << "\n";
+				std::cout << "bestmove " << MoveToUci(result.best_move) << "\n";
 			}
-			std::cout << "info depth " << result.depth << " score cp " << result.score
-				<< " nodes " << result.nodes << "\n";
-			std::cout << "bestmove " << MoveToUci(result.best_move) << "\n";
 		} else if (command == "quit") {
+			StopSearch(state);
 			break;
 		}
 		std::cout.flush();

@@ -4,6 +4,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <limits>
 #include <mutex>
 #include <thread>
 #include <vector>
@@ -445,18 +446,24 @@ SearchResult Search(Position& position, const SearchLimits& limits, Transpositio
 	SearchResult result;
 	SearchResult best;
 	bool have_best = false;
-	std::atomic<bool> stop{false};
-	auto* stop_ptr = limits.time_ms > 0 ? &stop : nullptr;
+	std::atomic<bool> local_stop{false};
+	auto* stop_ptr = limits.stop;
+	if (!stop_ptr && limits.time_ms > 0) {
+		stop_ptr = &local_stop;
+	}
 	auto deadline = limits.time_ms > 0
 		? std::chrono::steady_clock::now() + std::chrono::milliseconds(limits.time_ms)
 		: std::chrono::steady_clock::time_point::max();
 	int max_depth = limits.max_depth > 0 ? limits.max_depth : kMaxPly;
+	if (limits.infinite) {
+		max_depth = std::numeric_limits<int>::max();
+	}
 	for (int depth = 1; depth <= max_depth; ++depth) {
 		if (limits.time_ms > 0 && std::chrono::steady_clock::now() >= deadline) {
 			break;
 		}
 		result = SearchRoot(position, depth, threads, table, stop_ptr, deadline);
-		if (stop_ptr && stop.load(std::memory_order_relaxed)) {
+		if (stop_ptr && stop_ptr->load(std::memory_order_relaxed)) {
 			if (!have_best) {
 				best = result;
 			}
