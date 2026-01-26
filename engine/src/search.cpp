@@ -27,6 +27,11 @@ struct SearchContext {
 	std::array<std::array<int, kSquareCount>, kSquareCount> history{};
 };
 
+struct NullState {
+	Square en_passant_square = Square::kNoSquare;
+	Color side_to_move = Color::kWhite;
+};
+
 constexpr std::array<int, kPieceTypeCount> kMoveValues = {
 	0,    // kNone
 	100,  // kPawn
@@ -55,6 +60,31 @@ int ScoreFromTt(int score, int ply) {
 		return score + ply;
 	}
 	return score;
+}
+
+bool HasNonPawnMaterial(const Position& position) {
+	int us = ToIndex(position.side_to_move_);
+	for (PieceType type : {PieceType::kKnight, PieceType::kBishop, PieceType::kRook,
+		PieceType::kQueen}) {
+		if (position.piece_bb_[us][ToIndex(type)] != 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+void MakeNullMove(Position& position, NullState& state) {
+	state.en_passant_square = position.en_passant_square_;
+	state.side_to_move = position.side_to_move_;
+	position.en_passant_square_ = Square::kNoSquare;
+	position.side_to_move_ = OppositeColor(position.side_to_move_);
+	position.ComputeHash();
+}
+
+void UndoNullMove(Position& position, const NullState& state) {
+	position.en_passant_square_ = state.en_passant_square;
+	position.side_to_move_ = state.side_to_move;
+	position.ComputeHash();
 }
 
 bool IsTacticalMove(Move move) {
@@ -202,12 +232,28 @@ int AlphaBeta(Position& position, int depth, int alpha, int beta, SearchContext&
 		}
 	}
 
+	Square king_square = position.KingSquare(position.side_to_move_);
+	bool in_check = false;
+	if (king_square != Square::kNoSquare) {
+		in_check = IsSquareAttacked(position, king_square,
+			OppositeColor(position.side_to_move_));
+	}
+
+	if (!in_check && depth >= 3 && HasNonPawnMaterial(position)) {
+		int reduction = depth >= 6 ? 3 : 2;
+		NullState null_state;
+		MakeNullMove(position, null_state);
+		int reduced_depth = std::max(0, depth - 1 - reduction);
+		int score = -AlphaBeta(position, reduced_depth, -beta, -beta + 1, context, ply + 1);
+		UndoNullMove(position, null_state);
+		if (score >= beta) {
+			return score;
+		}
+	}
+
 	std::vector<Move> moves;
 	GenerateLegalMoves(position, moves);
 	if (moves.empty()) {
-		Square king_square = position.KingSquare(position.side_to_move_);
-		bool in_check = IsSquareAttacked(position, king_square,
-			OppositeColor(position.side_to_move_));
 		return in_check ? -kMateScore + ply : 0;
 	}
 
