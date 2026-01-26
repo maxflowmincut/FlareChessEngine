@@ -16,6 +16,7 @@ constexpr std::array<int, kPieceTypeCount> kPieceValue = {
 	900,  // kQueen
 	0,    // kKing
 };
+constexpr int kBishopPairBonus = 30;
 
 constexpr std::array<int, kFileCount> kCenterFile = {0, 1, 2, 3, 3, 2, 1, 0};
 constexpr std::array<int, kRankCount> kCenterRank = {0, 1, 2, 3, 3, 2, 1, 0};
@@ -93,6 +94,9 @@ int Evaluate(const Position& position) {
 	for (int color_index = 0; color_index < kColorCount; ++color_index) {
 		Color color = static_cast<Color>(color_index);
 		int sign = color == Color::kWhite ? 1 : -1;
+		if (std::popcount(position.piece_bb_[color_index][ToIndex(PieceType::kBishop)]) >= 2) {
+			score += sign * kBishopPairBonus;
+		}
 		for (int type_index = ToIndex(PieceType::kPawn);
 			type_index <= ToIndex(PieceType::kKing); ++type_index) {
 			PieceType type = static_cast<PieceType>(type_index);
