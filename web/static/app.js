@@ -10,6 +10,8 @@ const fenLabelEl = document.getElementById("fen-label");
 const moveCountEl = document.getElementById("move-count");
 const turnEl = document.getElementById("turn");
 const newGameBtn = document.getElementById("new-game");
+const movetimeEl = document.getElementById("movetime");
+const movetimeValueEl = document.getElementById("movetime-value");
 
 const pieceMap = {
   P: "♙",
@@ -29,6 +31,7 @@ const pieceMap = {
 let socket = null;
 let selectedSquare = null;
 let playerColor = "w";
+let movetimeTimer = null;
 let state = {
   board: new Map(),
   turn: "w",
@@ -253,6 +256,42 @@ function sendMessage(payload) {
   socket.send(JSON.stringify(payload));
 }
 
+function formatMovetime(ms) {
+  if (!Number.isFinite(ms) || ms <= 0) {
+    return "--";
+  }
+  if (ms >= 1000) {
+    const seconds = ms / 1000;
+    const precision = ms % 1000 === 0 ? 0 : 1;
+    return `${seconds.toFixed(precision)}s`;
+  }
+  return `${ms}ms`;
+}
+
+function updateMovetimeDisplay(ms) {
+  if (movetimeValueEl) {
+    movetimeValueEl.textContent = formatMovetime(ms);
+  }
+}
+
+function sendMovetime(ms) {
+  if (!Number.isFinite(ms)) {
+    return;
+  }
+  if (!socket || socket.readyState !== WebSocket.OPEN) {
+    return;
+  }
+  socket.send(JSON.stringify({ type: "movetime", movetime_ms: ms }));
+}
+
+function getMovetimeMs() {
+  if (!movetimeEl) {
+    return 0;
+  }
+  const parsed = parseInt(movetimeEl.value, 10);
+  return Number.isFinite(parsed) ? parsed : 0;
+}
+
 function onSquareClick(square) {
   if (state.waiting || state.turn !== playerColor) {
     return;
@@ -339,6 +378,7 @@ function connect() {
     setConnectionState("connected");
     setStatus("Connected");
     sendMessage({ type: "new", color: playerColor === "w" ? "white" : "black" });
+    sendMovetime(getMovetimeMs());
   });
 
   socket.addEventListener("message", (event) => {
@@ -371,7 +411,23 @@ function connect() {
 newGameBtn.addEventListener("click", () => {
   setPlayerColor(playerColor === "w" ? "b" : "w");
   sendMessage({ type: "new", color: playerColor === "w" ? "white" : "black" });
+  sendMovetime(getMovetimeMs());
 });
+
+if (movetimeEl) {
+  const initial = getMovetimeMs();
+  updateMovetimeDisplay(initial);
+  movetimeEl.addEventListener("input", () => {
+    const ms = getMovetimeMs();
+    updateMovetimeDisplay(ms);
+    if (movetimeTimer) {
+      clearTimeout(movetimeTimer);
+    }
+    movetimeTimer = setTimeout(() => {
+      sendMovetime(ms);
+    }, 200);
+  });
+}
 
 setPlayerColor("w");
 connect();

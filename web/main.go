@@ -22,16 +22,17 @@ import (
 )
 
 const (
-	opText = 1
+	opText  = 1
 	opClose = 8
-	opPing = 9
-	opPong = 10
+	opPing  = 9
+	opPong  = 10
 )
 
 type ClientMessage struct {
-	Type string `json:"type"`
-	Uci  string `json:"uci,omitempty"`
-	Color string `json:"color,omitempty"`
+	Type       string `json:"type"`
+	Uci        string `json:"uci,omitempty"`
+	Color      string `json:"color,omitempty"`
+	MovetimeMs int    `json:"movetime_ms,omitempty"`
 }
 
 type ServerMessage struct {
@@ -310,14 +311,20 @@ func (e *EngineProcess) LegalMoves(moves []string) ([]string, error) {
 	return fields[1:], nil
 }
 
-func (e *EngineProcess) BestMove(moves []string, depth int) (string, error) {
+func (e *EngineProcess) BestMove(moves []string, depth int, movetimeMs int) (string, error) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if err := e.sendLocked(buildPositionCommand(moves)); err != nil {
 		return "", err
 	}
-	if err := e.sendLocked(fmt.Sprintf("go depth %d", depth)); err != nil {
-		return "", err
+	if movetimeMs > 0 {
+		if err := e.sendLocked(fmt.Sprintf("go movetime %d", movetimeMs)); err != nil {
+			return "", err
+		}
+	} else {
+		if err := e.sendLocked(fmt.Sprintf("go depth %d", depth)); err != nil {
+			return "", err
+		}
 	}
 	for {
 		line, err := e.readLineLocked()
@@ -403,9 +410,10 @@ func buildPositionCommand(moves []string) string {
 }
 
 type Session struct {
-	engine *EngineProcess
-	moves  []string
-	depth  int
+	engine        *EngineProcess
+	moves         []string
+	depth         int
+	movetimeMs    int
 	playerIsWhite bool
 }
 
@@ -459,7 +467,7 @@ func (s *Session) Reset(playerIsWhite bool) (string, string, string, error) {
 		return "Game over", gameOverMessage(s.moves, s.playerIsWhite, inCheck), "", nil
 	}
 
-	bestMove, err := s.engine.BestMove(s.moves, s.depth)
+	bestMove, err := s.engine.BestMove(s.moves, s.depth, s.movetimeMs)
 	if err != nil {
 		return "", "", "", err
 	}
@@ -502,7 +510,7 @@ func (s *Session) SendState(ws *WsConn, status, engineMove, message string) erro
 	return ws.WriteJSON(state)
 }
 
-func handleSession(ws *WsConn, enginePath string, depth int) {
+func handleSession(ws *WsConn, enginePath string, depth int, movetimeMs int) {
 	defer ws.Close()
 
 	engine, err := startEngine(enginePath)
@@ -512,7 +520,12 @@ func handleSession(ws *WsConn, enginePath string, depth int) {
 	}
 	defer engine.Close()
 
-	session := &Session{engine: engine, depth: depth, playerIsWhite: true}
+	session := &Session{
+		engine:        engine,
+		depth:         depth,
+		movetimeMs:    movetimeMs,
+		playerIsWhite: true,
+	}
 	status, message, engineMove, err := session.Reset(true)
 	if err != nil {
 		_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
@@ -543,6 +556,15 @@ func handleSession(ws *WsConn, enginePath string, depth int) {
 				continue
 			}
 			_ = session.SendState(ws, status, engineMove, message)
+		case "movetime":
+			value := msg.MovetimeMs
+			if value < 0 {
+				value = 0
+			}
+			if value > 10000 {
+				value = 10000
+			}
+			session.movetimeMs = value
 		case "move":
 			uci := strings.TrimSpace(msg.Uci)
 			if uci == "" {
@@ -579,7 +601,7 @@ func handleSession(ws *WsConn, enginePath string, depth int) {
 				_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 				continue
 			}
-			bestMove, err := session.engine.BestMove(session.moves, session.depth)
+			bestMove, err := session.engine.BestMove(session.moves, session.depth, session.movetimeMs)
 			if err != nil {
 				_ = ws.WriteJSON(ServerMessage{Type: "error", Message: err.Error()})
 				continue
@@ -642,6 +664,7 @@ func main() {
 	addr := flag.String("addr", "127.0.0.1:8080", "listen address")
 	enginePath := flag.String("engine", defaultEnginePath(), "path to engine binary")
 	depth := flag.Int("depth", 4, "search depth for engine replies")
+	movetimeMs := flag.Int("movetime", 1000, "search time per move in ms (overrides depth when > 0)")
 	staticDir := flag.String("static", "static", "static file directory")
 	flag.Parse()
 
@@ -658,7 +681,7 @@ func main() {
 			http.Error(w, "websocket upgrade failed", http.StatusBadRequest)
 			return
 		}
-		go handleSession(ws, *enginePath, *depth)
+		go handleSession(ws, *enginePath, *depth, *movetimeMs)
 	})
 
 	log.Printf("listening on http://%s", *addr)

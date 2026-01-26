@@ -247,6 +247,38 @@ body[data-connection="disconnected"] .status-dot {
   gap: 6px;
 }
 
+.control {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.control-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 14px;
+}
+
+.control-label {
+  color: var(--muted);
+}
+
+.control-value {
+  font-family: "Space Mono", monospace;
+  font-size: 13px;
+}
+
+.range {
+  width: 100%;
+  accent-color: var(--accent);
+}
+
+.control-hint {
+  font-size: 12px;
+  color: var(--muted);
+}
+
 .meta-row {
   display: flex;
   justify-content: space-between;
