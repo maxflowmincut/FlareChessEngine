@@ -17,10 +17,14 @@ namespace {
 constexpr int kInfinity = 32000;
 constexpr int kMateScore = 30000;
 constexpr int kMateThreshold = 29000;
+constexpr int kMaxPly = 64;
+constexpr int kHistoryMax = 1'000'000;
 
 struct SearchContext {
 	TranspositionTable& table;
 	std::uint64_t nodes = 0;
+	std::array<std::array<Move, 2>, kMaxPly> killers{};
+	std::array<std::array<int, kSquareCount>, kSquareCount> history{};
 };
 
 constexpr std::array<int, kPieceTypeCount> kMoveValues = {
@@ -61,7 +65,7 @@ bool IsTacticalMove(Move move) {
 	return CapturedPiece(move) != PieceType::kNone;
 }
 
-int MoveScore(Move move, Move tt_move) {
+int MoveScore(Move move, Move tt_move, const SearchContext* context, int ply) {
 	if (move == tt_move) {
 		return 1000000;
 	}
@@ -74,15 +78,42 @@ int MoveScore(Move move, Move tt_move) {
 	if (MoveFlagOf(move) == MoveFlag::kPromotion) {
 		score += 8000 + kMoveValues[ToIndex(PromotionPiece(move))];
 	}
+	if (context && !IsTacticalMove(move)) {
+		int ply_index = std::min(ply, kMaxPly - 1);
+		const auto& killers = context->killers[ply_index];
+		if (move == killers[0]) {
+			score += 7000;
+		} else if (move == killers[1]) {
+			score += 6000;
+		}
+		score += context->history[ToIndex(FromSquare(move))][ToIndex(ToSquare(move))];
+	}
 	return score;
 }
 
-void OrderMoves(std::vector<Move>& moves, Move tt_move) {
+void OrderMoves(std::vector<Move>& moves, Move tt_move, const SearchContext* context, int ply) {
 	if (moves.size() < 2) {
 		return;
 	}
 	std::stable_sort(moves.begin(), moves.end(),
-		[tt_move](Move a, Move b) { return MoveScore(a, tt_move) > MoveScore(b, tt_move); });
+		[tt_move, context, ply](Move a, Move b) {
+			return MoveScore(a, tt_move, context, ply) > MoveScore(b, tt_move, context, ply);
+		});
+}
+
+void UpdateHistory(SearchContext& context, Move move, int depth, int ply) {
+	if (IsTacticalMove(move)) {
+		return;
+	}
+	int ply_index = std::min(ply, kMaxPly - 1);
+	auto& killers = context.killers[ply_index];
+	if (killers[0] != move) {
+		killers[1] = killers[0];
+		killers[0] = move;
+	}
+	int bonus = depth * depth;
+	int& entry = context.history[ToIndex(FromSquare(move))][ToIndex(ToSquare(move))];
+	entry = std::min(kHistoryMax, entry + bonus);
 }
 
 int Quiescence(Position& position, int alpha, int beta, SearchContext& context, int ply) {
@@ -123,7 +154,7 @@ int Quiescence(Position& position, int alpha, int beta, SearchContext& context, 
 		return stand_pat;
 	}
 
-	OrderMoves(moves, kNoMove);
+	OrderMoves(moves, kNoMove, &context, ply);
 	for (Move move : moves) {
 		MoveState state;
 		MakeMove(position, move, state);
@@ -180,7 +211,7 @@ int AlphaBeta(Position& position, int depth, int alpha, int beta, SearchContext&
 		return in_check ? -kMateScore + ply : 0;
 	}
 
-	OrderMoves(moves, tt_move);
+	OrderMoves(moves, tt_move, &context, ply);
 
 	Move best_move = kNoMove;
 	int best_score = -kInfinity;
@@ -199,6 +230,7 @@ int AlphaBeta(Position& position, int depth, int alpha, int beta, SearchContext&
 			alpha = score;
 		}
 		if (alpha >= beta) {
+			UpdateHistory(context, move, depth, ply);
 			break;
 		}
 	}
@@ -231,9 +263,9 @@ SearchResult SearchRoot(Position& position, int depth, int threads, Transpositio
 
 	TranspositionEntry entry;
 	if (table.Probe(position.hash_, entry)) {
-		OrderMoves(moves, entry.best_move);
+		OrderMoves(moves, entry.best_move, nullptr, 0);
 	} else {
-		OrderMoves(moves, kNoMove);
+		OrderMoves(moves, kNoMove, nullptr, 0);
 	}
 
 	int best_score = -kInfinity;
